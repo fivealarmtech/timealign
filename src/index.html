@@ -39,7 +39,7 @@
         <div class="row mac-only"><label style="flex:1">Noise level <span id="levelTxt" class="mono"></span>
           <input id="level" type="range" min="-50" max="0" step="1" value="-18"></label></div>
         <div class="meter"><div id="meterBar"></div><span id="meterTxt">mic — dBFS</span></div>
-        <div class="hint mac-only">Dante mic: choose <b>Dante Virtual Soundcard</b> as Input and, in Dante Controller, route the mic’s preamp channel to DVS receive channel 1 (or 2). The browser can only read inputs 1–2 of any device. DVS for both input and output keeps everything on one clock (best accuracy).</div>
+        <div class="hint mac-only">Dante mic: choose <b>Dante Virtual Soundcard</b> as Input and, in Dante Controller, route the mic’s preamp channel to DVS receive channel 1 (or 2). In a browser only inputs 1–2 are reachable; the Mac app can use any input channel. DVS for both input and output keeps everything on one clock (best accuracy).</div>
         <div class="hint" id="ctxInfo"></div>
       </div>
     </div>

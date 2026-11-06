@@ -54,6 +54,31 @@
     manualOn: false, devices: [], seqReady: false,
   };
 
+  // ---- Native Mac app (Core Audio) bridge ----------------------------------------------------
+  const NATIVE = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ta);
+  const nat = { devices: [], defOut: '', defIn: '', devWait: null, openWait: null, playRef: { frame: 0, t: 0 }, seqSent: false };
+  const natPost = (o) => window.webkit.messageHandlers.ta.postMessage(o);
+  function b64f32(str) {
+    const bin = atob(str), u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return new Float32Array(u8.buffer);
+  }
+  function f32b64(f) {
+    const u8 = new Uint8Array(f.buffer, f.byteOffset, f.byteLength); let out = '';
+    for (let i = 0; i < u8.length; i += 0x8000) out += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return btoa(out);
+  }
+  window.__native = {
+    onDevices(list, defs) { nat.devices = list || []; nat.defOut = (defs || [])[0] || ''; nat.defIn = (defs || [])[1] || ''; if (nat.devWait) { const w = nat.devWait; nat.devWait = null; w(); } },
+    onDevicesChanged() { listDevices().catch(() => {}); },
+    onOpen(r) { if (nat.openWait) { const w = nat.openWait; nat.openWait = null; w(r); } },
+    onChunk(f, micB64, refB64, playFrame) {
+      nat.playRef = { frame: playFrame, t: performance.now() };
+      onChunk(f, b64f32(micB64), b64f32(refB64), true);
+    },
+  };
+  const engineOn = () => (NATIVE ? E.native : !!E.ctx);
+
   function setStatus(t, cls) { const el = $('#progTxt'); el.textContent = t; el.className = 'hint ' + (cls || ''); }
   function banner(html) { const b = $('#banner'); if (!html) { b.hidden = true; return; } b.innerHTML = html; b.hidden = false; }
 
@@ -66,7 +91,41 @@
     E.seqReady = true;
   }
 
+  function fillMicCh() {
+    const sel = $('#micCh');
+    const dev = nat.devices.find((d) => d.uid === S.inId);
+    const n = NATIVE ? Math.max(1, Math.min(128, (dev && dev.inCh) || 2)) : 2;
+    sel.innerHTML = '';
+    for (let i = 1; i <= n; i++) { const o = document.createElement('option'); o.value = String(i); o.textContent = String(i); sel.appendChild(o); }
+    if (+S.micCh > n) S.micCh = 1;
+    sel.value = String(S.micCh);
+  }
+  async function listDevicesNative() {
+    await new Promise((res) => { nat.devWait = res; natPost({ cmd: 'devices' }); setTimeout(res, 3000); });
+    const outs = nat.devices.filter((d) => d.outCh > 0), ins = nat.devices.filter((d) => d.inCh > 0);
+    const rateTxt = (d) => (Math.abs(d.rate - FS) > 1 && d.rate ? ` · ${d.rate / 1000} kHz` : '');
+    const fillN = (sel, list, kind, val) => {
+      sel.innerHTML = '';
+      for (const d of list) {
+        const o = document.createElement('option'); o.value = d.uid;
+        o.textContent = `${d.name} — ${kind === 'out' ? d.outCh + ' out' : d.inCh + ' in'}${rateTxt(d)}`;
+        sel.appendChild(o);
+      }
+      sel.value = val;
+    };
+    const has = (list, uid) => list.some((d) => d.uid === uid);
+    if (!has(outs, S.outId)) S.outId = ((outs.find((d) => /dante|dvs/i.test(d.name)) || outs.find((d) => d.uid === nat.defOut) || outs[0]) || {}).uid || '';
+    if (!has(ins, S.inId)) S.inId = ((ins.find((d) => d.uid === nat.defIn) || ins[0]) || {}).uid || '';
+    fillN($('#outSel'), outs, 'out', S.outId); fillN($('#inSel'), ins, 'in', S.inId);
+    fillMicCh(); save();
+    const dante = nat.devices.some((d) => /dante|dvs/i.test(d.name));
+    const msg = S.role === 'mac' && !dante
+      ? 'Dante Virtual Soundcard isn’t running, so macOS isn’t offering it. Open Dante Virtual Soundcard and press Start; it appears here automatically.' : '';
+    $('#devMsg').innerHTML = msg; $('#devMsg').hidden = !msg;
+  }
+
   async function listDevices() {
+    if (NATIVE) return listDevicesNative();
     const devs = await navigator.mediaDevices.enumerateDevices();
     E.devices = devs;
     const fill = (sel, kind, cur) => {
@@ -98,13 +157,40 @@
 
   async function closeEngine() {
     stopAll(true);
+    if (NATIVE) { if (E.native) natPost({ cmd: 'close' }); E.native = false; E.manualOn = false; $('#manNoise').textContent = '▶ Start noise'; return; }
     try { if (E.stream) E.stream.getTracks().forEach((t) => t.stop()); } catch (e) { /* ignore */ }
     try { if (E.ctx) await E.ctx.close(); } catch (e) { /* ignore */ }
     E.ctx = null; E.srcs.clear(); E.stream = null; E.cap = null; E.merger = null; E.manualOn = false;
     $('#manNoise').textContent = '▶ Start noise';
   }
 
+  async function openNative() {
+    await closeEngine();
+    lastSol = null;
+    const playback = S.role === 'mac';
+    const ref = playback && S.refMode === 'loop' ? (+S.micCh === 1 ? 2 : 1) : 0;
+    setStatus('Opening audio devices…');
+    const r = await new Promise((res) => {
+      nat.openWait = res;
+      natPost({ cmd: 'open', out: playback ? S.outId : '', in: S.inId, micCh: +S.micCh, refCh: ref });
+      setTimeout(() => res({ ok: false, error: 'No answer from the audio system (if a microphone permission box is showing, answer it, then press Restart audio).' }), 30000);
+    });
+    if (!r || !r.ok) { setStatus((r && r.error) || 'Could not open the audio devices.', 'bad'); return; }
+    E.native = true; E.nOut = r.outCh || 0; E.inCh = r.inCh || 0;
+    if (!nat.seqSent) { for (const id of ALL_IDS) natPost({ cmd: 'seq', id, data: f32b64(TA.getSequence(id).x) }); nat.seqSent = true; }
+    E.an = new TA.Analyzer({ candidates: ALL_IDS, useRef: !!ref });
+    if (playback) $('#outInfo').innerHTML = `<b>${esc(r.outName || '')}</b>: ${E.nOut} output channel${E.nOut === 1 ? '' : 's'}`;
+    $('#ctxInfo').innerHTML = `48 kHz · ${esc(r.inName || '')}: mic on input ${r.micCh} of ${E.inCh}` + (ref ? `, loop-back on ${ref}` : '') +
+      (playback ? ` · ${esc(r.outName || '')}: ${E.nOut} outputs` : '') + ' · native Core Audio';
+    $('#audioCfg').hidden = false;
+    $('#startBtn').textContent = 'Restart audio';
+    $('#startBtn').classList.remove('primary');
+    setStatus('Ready.');
+    updateLevelTxt();
+  }
+
   async function openEngine() {
+    if (NATIVE) return openNative();
     await closeEngine();
     lastSol = null;
     const playback = S.role === 'mac';
@@ -193,23 +279,48 @@
   }
 
   // ------------------------------------------------------------------ playback control
-  function route(id, chans) {
-    const s = E.srcs.get(id); if (!s) return [];
-    try { s.g.disconnect(E.merger); } catch (e) { /* not connected */ }
-    const used = [];
-    for (const c of chans) if (c >= 1 && c <= E.nOut) { s.g.connect(E.merger, 0, c - 1); used.push(c); }
-    if (S.refMode === 'loop' && S.refOut >= 1 && S.refOut <= E.nOut && !chans.includes(+S.refOut)) s.g.connect(E.merger, 0, S.refOut - 1);
-    return used;
-  }
   function holdAt(param, t) {
     if (param.cancelAndHoldAtTime) param.cancelAndHoldAtTime(t);
     else { param.cancelScheduledValues(t); param.setValueAtTime(param.value, t); }
   }
-  function stopAll(quiet) {
-    if (E.ctx) {
+  // Same calls drive Web Audio (browser) or the native Core Audio engine (Mac app).
+  const pb = {
+    now() { return NATIVE ? Math.round(nat.playRef.frame + (performance.now() - nat.playRef.t) * FS / 1000) : Math.round(E.ctx.currentTime * FS); },
+    t0() { return NATIVE ? 0 : E.t0F; },
+    route(id, chans) {
+      const used = chans.filter((c) => c >= 1 && c <= E.nOut);
+      const extra = S.refMode === 'loop' && S.refOut >= 1 && S.refOut <= E.nOut && !used.includes(+S.refOut) ? [+S.refOut] : [];
+      if (NATIVE) { natPost({ cmd: 'route', id, chans: used.concat(extra) }); return used; }
+      const s = E.srcs.get(id); if (!s) return [];
+      try { s.g.disconnect(E.merger); } catch (e) { /* not connected */ }
+      for (const c of used.concat(extra)) s.g.connect(E.merger, 0, c - 1);
+      return used;
+    },
+    on(id, frame, level, rampS) {
+      if (NATIVE) { natPost({ cmd: 'gate', id, frame, target: level, ramp: Math.round(rampS * FS) }); return; }
+      const g = E.srcs.get(id).g.gain, t = frame / FS;
+      g.setValueAtTime(0, t); g.linearRampToValueAtTime(level, t + rampS);
+    },
+    off(id, frame, level, rampS) {
+      if (NATIVE) { natPost({ cmd: 'gate', id, frame: frame - Math.round(rampS * FS), target: 0, ramp: Math.round(rampS * FS) }); return; }
+      const g = E.srcs.get(id).g.gain, t = frame / FS;
+      g.setValueAtTime(level, t - rampS); g.linearRampToValueAtTime(0, t);
+    },
+    set(id, level, rampS) {
+      if (NATIVE) { natPost({ cmd: 'gate', id, frame: -1, target: level, ramp: Math.round(rampS * FS) }); return; }
+      const g = E.srcs.get(id).g.gain, t = E.ctx.currentTime;
+      holdAt(g, t); g.linearRampToValueAtTime(level, t + rampS);
+    },
+    silence() {
+      if (NATIVE) { if (E.native) natPost({ cmd: 'stopAll' }); return; }
+      if (!E.ctx) return;
       const t = E.ctx.currentTime;
       for (const s of E.srcs.values()) { holdAt(s.g.gain, t); s.g.gain.linearRampToValueAtTime(0, t + 0.03); }
-    }
+    },
+  };
+  function route(id, chans) { return pb.route(id, chans); }
+  function stopAll(quiet) {
+    pb.silence();
     E.manualOn = false;
     $('#manNoise').textContent = '▶ Start noise';
     if (seq.timer) { clearInterval(seq.timer); seq.timer = null; }
@@ -220,16 +331,14 @@
   }
   function updateLevelTxt() {
     $('#levelTxt').textContent = `${S.level} dB → pink noise ≈ ${(S.level - 12).toFixed(0)} dBFS RMS`;
-    if (E.ctx && E.manualOn) {
-      const g = E.srcs.get(0).g.gain; holdAt(g, E.ctx.currentTime); g.linearRampToValueAtTime(dbToGain(S.level), E.ctx.currentTime + 0.05);
-    }
+    if (engineOn() && E.manualOn) pb.set(0, dbToGain(S.level), 0.05);
   }
 
   // Auto sequence: each checked speaker gets K periods of its own noise sequence, then the first
   // one again at the end (book-end) so clock drift between devices can be measured precisely.
   const seq = { timer: null, playing: false };
   function playSequence(listen) {
-    if (!E.ctx || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
+    if (!engineOn() || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
     stopAll(true);
     const zones = S.zones.filter((z) => z.on && z.id >= 1);
     if (!zones.length) { setStatus('Check at least one speaker.', 'bad'); return; }
@@ -241,22 +350,21 @@
     if (missing.length) { setStatus(`No valid output channel for: ${missing.join(', ')} (device has ${E.nOut} channels).`, 'bad'); return; }
     const K = +S.speed;
     const order = zones.map((z) => z.id); order.push(zones[0].id);
-    const nowF = Math.round(E.ctx.currentTime * FS);
-    const m = Math.ceil((nowF + 0.3 * FS - E.t0F) / P);
-    const start = E.t0F + m * P, segF = K * P, L = dbToGain(S.level), ramp = 0.02;
+    const nowF = pb.now();
+    const m = Math.ceil((nowF + 0.3 * FS - pb.t0()) / P);
+    const start = pb.t0() + m * P, segF = K * P, L = dbToGain(S.level), ramp = 0.02;
     order.forEach((id, i) => {
-      const g = E.srcs.get(id).g.gain, a = (start + i * segF) / FS, b = (start + (i + 1) * segF) / FS;
-      g.setValueAtTime(0, a); g.linearRampToValueAtTime(L, a + ramp);
-      g.setValueAtTime(L, b - ramp); g.linearRampToValueAtTime(0, b);
+      pb.on(id, start + i * segF, L, ramp);
+      pb.off(id, start + (i + 1) * segF, L, ramp);
     });
     const endF = start + order.length * segF;
     seq.playing = true;
     $('#stopBtn').classList.add('live');
     if (listen) startSession('auto', { name: S.posName || 'Position', ids: new Set(order) });
     const total = (endF - nowF) / FS + (listen ? (P / FS + 0.6) : 0);
-    const t0 = E.ctx.currentTime;
+    const t0 = pb.now() / FS;
     seq.timer = setInterval(() => {
-      const t = E.ctx.currentTime, f = Math.round(t * FS);
+      const f = pb.now(), t = f / FS;
       setProg((t - t0) / total);
       if (f < start) setStatus('Starting…');
       else if (f < endF) {
@@ -273,13 +381,12 @@
   }
 
   function toggleManualNoise() {
-    if (!E.ctx || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
+    if (!engineOn() || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
     if (E.manualOn) { stopAll(true); setStatus('Noise off.'); return; }
     stopAll(true);
     const used = route(0, parseCh(S.manCh));
     if (!used.length) { setStatus(`Noise out channel must be 1–${E.nOut}.`, 'bad'); return; }
-    const g = E.srcs.get(0).g.gain, t = E.ctx.currentTime;
-    holdAt(g, t); g.linearRampToValueAtTime(dbToGain(S.level), t + 0.5);
+    pb.set(0, dbToGain(S.level), 0.5);
     E.manualOn = true;
     $('#manNoise').textContent = '■ Stop noise';
     $('#stopBtn').classList.add('live');
@@ -288,13 +395,12 @@
   }
 
   function testZone(z) {
-    if (!E.ctx || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
+    if (!engineOn() || S.role !== 'mac') { setStatus('Start audio first.', 'bad'); return; }
     stopAll(true);
     const used = route(z.id, parseCh(z.ch));
     if (!used.length) { setStatus(`Out ch for ${z.name} must be 1–${E.nOut}.`, 'bad'); return; }
-    const g = E.srcs.get(z.id).g.gain, t = E.ctx.currentTime;
-    holdAt(g, t); g.linearRampToValueAtTime(dbToGain(S.level), t + 0.1);
-    g.setValueAtTime(dbToGain(S.level), t + 2); g.linearRampToValueAtTime(0, t + 2.1);
+    pb.set(z.id, dbToGain(S.level), 0.1);
+    pb.off(z.id, pb.now() + Math.round(2.2 * FS), dbToGain(S.level), 0.1);
     setStatus(`Test: ${z.name} on out ${used.join(', ')} for 2 s.`);
   }
 
@@ -380,10 +486,10 @@
 
   // ------------------------------------------------------------------ audio input
   let lastFrame = 0, meterPk = -120, meterT = 0;
-  function onChunk(f, a, b) {
+  function onChunk(f, a, b, preselected) {
     lastFrame = f + a.length;
-    const mic = S.micCh === 2 ? b : a;
-    const ref = mic === a ? b : a;
+    const mic = preselected ? a : (S.micCh === 2 ? b : a);
+    const ref = preselected ? b : (mic === a ? b : a);
     let pk = 0, ss = 0;
     for (let i = 0; i < mic.length; i++) { const v = mic[i]; ss += v * v; const av = v < 0 ? -v : v; if (av > pk) pk = av; }
     const now = performance.now();
@@ -394,7 +500,7 @@
     for (let i = 0; i < other.length; i += 4) o2 += other[i] * other[i];
     const otherDb = 10 * Math.log10(o2 / (other.length / 4) + 1e-12);
     $('#meterTxt').textContent = `in ${S.micCh} (mic) ${rmsDb.toFixed(0)} dBFS · peak ${meterPk.toFixed(0)}` + (meterPk > -1 ? ' CLIP' : '') +
-      (E.inCh > 1 ? `  |  in ${S.micCh === 1 ? 2 : 1}: ${otherDb.toFixed(0)}` : '');
+      (E.inCh > 1 && !preselected ? `  |  in ${S.micCh === 1 ? 2 : 1}: ${otherDb.toFixed(0)}` : '');
     $('#meterTxt').style.color = meterPk > -1 ? '#ff6b6b' : '';
     if (!E.an) return;
     const blocks = E.an.push(mic, E.an.useRef ? ref : null, f);
@@ -761,6 +867,7 @@
 
   // ------------------------------------------------------------------ UI wiring
   function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  async function copyText(t) { if (NATIVE) { natPost({ cmd: 'copy', text: t }); return; } await navigator.clipboard.writeText(t); }
   function setProg(f) { $('#progBar').style.width = Math.max(0, Math.min(1, f)) * 100 + '%'; }
 
   function renderZones() {
@@ -825,7 +932,7 @@
     S.role = role; save();
     document.body.className = 'role-' + role;
     $$('#roleSeg button').forEach((b) => b.classList.toggle('on', b.dataset.role === role));
-    if (!silent && E.ctx) openEngine().catch(showErr);
+    if (!silent && engineOn()) openEngine().catch(showErr);
   }
   function setMode(mode) {
     S.mode = mode; save();
@@ -842,6 +949,10 @@
 
   function bind() {
     $('#startBtn').onclick = async () => {
+      if (NATIVE) {
+        try { setStatus('Finding audio devices…'); await listDevices(); if (!E.seqReady) await prepareSequences(); await openEngine(); } catch (e) { showErr(e); }
+        return;
+      }
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           banner('This page can’t reach the microphone here. Open it from <b>https://</b> or <b>http://localhost</b> (see the included launcher), in Chrome on the Mac or Safari on iPhone.');
@@ -858,12 +969,12 @@
       } catch (e) { showErr(e); }
     };
     $('#refreshDev').onclick = () => listDevices().catch(showErr);
-    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    if (!NATIVE && navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener('devicechange', () => { if (E.stream) listDevices().catch(() => {}); });
     }
     $('#outSel').onchange = () => { S.outId = $('#outSel').value; save(); openEngine().catch(showErr); };
-    $('#inSel').onchange = () => { S.inId = $('#inSel').value; save(); openEngine().catch(showErr); };
-    $('#micCh').onchange = () => { S.micCh = +$('#micCh').value; save(); };
+    $('#inSel').onchange = () => { S.inId = $('#inSel').value; save(); if (NATIVE) fillMicCh(); openEngine().catch(showErr); };
+    $('#micCh').onchange = () => { S.micCh = +$('#micCh').value; save(); if (NATIVE && engineOn()) openEngine().catch(showErr); };
     $('#refMode').onchange = () => { S.refMode = $('#refMode').value; save(); $('#refOutLbl').hidden = S.refMode !== 'loop'; if (E.ctx) openEngine().catch(showErr); };
     $('#refOut').onchange = () => { S.refOut = +$('#refOut').value; save(); };
     $('#level').oninput = () => { S.level = +$('#level').value; save(); updateLevelTxt(); };
@@ -929,20 +1040,23 @@
     };
     $('#fileIn').onchange = (e) => { const f = e.target.files[0]; if (f) analyzeFile(f).catch(showErr); e.target.value = ''; };
     $('#snapSel').onchange = () => { curSnap = snaps.find((s) => String(s.id) === $('#snapSel').value) || null; renderResults(); };
-    $('#copyRes').onclick = async () => { try { await navigator.clipboard.writeText(resultsText()); setStatus('Results copied.', 'good'); } catch (e) { setStatus('Copy failed: select the table and copy manually.', 'warn'); } };
+    $('#copyRes').onclick = async () => { try { await copyText(resultsText()); setStatus('Results copied.', 'good'); } catch (e) { setStatus('Copy failed: select the table and copy manually.', 'warn'); } };
     $('#clearRes').onclick = () => { snaps.length = 0; curSnap = null; lastSol = null; renderSnapList(); renderResults(); };
-    $('#copyCode').onclick = async () => { try { await navigator.clipboard.writeText(setupCode()); setStatus('Setup code copied — paste it on the iPhone.', 'good'); } catch (e) { $('#codeOut').select(); } };
+    $('#copyCode').onclick = async () => { try { await copyText(setupCode()); setStatus('Setup code copied — paste it on the iPhone.', 'good'); } catch (e) { $('#codeOut').select(); } };
     $('#applyCode').onclick = () => { try { applyCode($('#codeIn').value); setStatus('Speaker names loaded from the Mac.', 'good'); } catch (e) { setStatus('That code didn’t work: copy it again from the Mac.', 'bad'); } };
     window.addEventListener('resize', () => drawPlot());
   }
 
   // ------------------------------------------------------------------ boot
   bind(); renderZones(); syncInputs(); drawPlot();
-  if (!window.isSecureContext) {
+  if (NATIVE) {
+    document.documentElement.classList.add('native');
+    $('#roleSeg button[data-role=listen]').textContent = 'Listen only';
+  } else if (!window.isSecureContext) {
     banner('Microphone access needs a secure address. On the Mac, open TimeAlign with the included launcher (http://localhost) or from https://. On iPhone it must be an https:// link.');
   } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && S.role === 'mac') {
     setRole('listen', true);
   }
   // test hook
-  window.__TA_APP = { S, snaps, computePlan: () => computePlan(curSnap), get sess() { return sess; }, E, analyzeFile, applyCode, setupCode };
+  window.__TA_APP = { NATIVE, pb, S, snaps, computePlan: () => computePlan(curSnap), get sess() { return sess; }, E, analyzeFile, applyCode, setupCode };
 })();

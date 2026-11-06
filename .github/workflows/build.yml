@@ -9,25 +9,33 @@ permissions:
   id-token: write
 jobs:
   mac-app:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm install
-      - run: npm run dist
+      - name: Build TimeAlign.app (native Swift + Core Audio)
+        run: bash native/build.sh 2>&1 | tee build.log
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.${{ github.run_number }}
-          name: TimeAlign 1.1.${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: TimeAlign 2.0 (build ${{ github.run_number }})
           make_latest: true
           body: |
-            Download TimeAlign-…-arm64.dmg for Apple Silicon Macs (M1/M2/M3/M4), the other .dmg for Intel Macs.
-            First launch: System Settings > Privacy & Security > "Open Anyway".
+            Native Mac app (Apple Silicon + Intel, macOS 11+). Download **TimeAlign.dmg**, open it, drag TimeAlign to Applications.
+            First launch: System Settings > Privacy & Security > "Open Anyway" (the app isn't notarized by Apple).
           files: |
-            dist/*.dmg
-            dist/*.zip
+            dist/TimeAlign.dmg
+            dist/TimeAlign-mac.zip
+      - name: Publish build log on failure
+        if: failure()
+        run: |
+          git config user.name "ci"; git config user.email "ci@users.noreply.github.com"
+          cp build.log /tmp/build.log 2>/dev/null || echo "no build.log" > /tmp/build.log
+          git checkout --orphan ci-log
+          git rm -rf --cached . > /dev/null
+          cp /tmp/build.log build.log
+          git add build.log
+          git commit -m "build log for run ${{ github.run_number }}"
+          git push -f origin ci-log
   iphone-page:
     runs-on: ubuntu-latest
     environment:
