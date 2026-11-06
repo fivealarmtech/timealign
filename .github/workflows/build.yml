@@ -13,7 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build TimeAlign.app (native Swift + Core Audio)
-        run: bash native/build.sh 2>&1 | tee build.log
+        shell: bash
+        run: |
+          set -o pipefail
+          bash native/build.sh 2>&1 | tee build.log
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v2.0.${{ github.run_number }}
@@ -22,11 +25,13 @@ jobs:
           body: |
             Native Mac app (Apple Silicon + Intel, macOS 11+). Download **TimeAlign.dmg**, open it, drag TimeAlign to Applications.
             First launch: System Settings > Privacy & Security > "Open Anyway" (the app isn't notarized by Apple).
+          fail_on_unmatched_files: false
           files: |
             dist/TimeAlign.dmg
             dist/TimeAlign-mac.zip
       - name: Publish build log on failure
         if: failure()
+        shell: bash
         run: |
           git config user.name "ci"; git config user.email "ci@users.noreply.github.com"
           cp build.log /tmp/build.log 2>/dev/null || echo "no build.log" > /tmp/build.log

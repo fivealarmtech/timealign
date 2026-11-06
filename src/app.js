@@ -72,6 +72,11 @@
     onDevices(list, defs) { nat.devices = list || []; nat.defOut = (defs || [])[0] || ''; nat.defIn = (defs || [])[1] || ''; if (nat.devWait) { const w = nat.devWait; nat.devWait = null; w(); } },
     onDevicesChanged() { listDevices().catch(() => {}); },
     onOpen(r) { if (nat.openWait) { const w = nat.openWait; nat.openWait = null; w(r); } },
+    onFile(names, b64) {
+      const bin = atob(b64), u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      analyzeFile({ name: (names || ['recording'])[0], arrayBuffer: async () => u8.buffer }).catch(showErr);
+    },
     onChunk(f, micB64, refB64, playFrame) {
       nat.playRef = { frame: playFrame, t: performance.now() };
       onChunk(f, b64f32(micB64), b64f32(refB64), true);
@@ -1038,6 +1043,7 @@
       sess = { kind: 'manual', blocks: [], name: S.posName, capture: null, lastId: null, lastS: -1e15, idleSince: performance.now(), seen: new Map() };
       setStatus(`New position: ${S.posName}. Capture each speaker again.`);
     };
+    if (NATIVE) $('#fileIn').addEventListener('click', (e) => { e.preventDefault(); natPost({ cmd: 'openFile' }); });
     $('#fileIn').onchange = (e) => { const f = e.target.files[0]; if (f) analyzeFile(f).catch(showErr); e.target.value = ''; };
     $('#snapSel').onchange = () => { curSnap = snaps.find((s) => String(s.id) === $('#snapSel').value) || null; renderResults(); };
     $('#copyRes').onclick = async () => { try { await copyText(resultsText()); setStatus('Results copied.', 'good'); } catch (e) { setStatus('Copy failed: select the table and copy manually.', 'warn'); } };

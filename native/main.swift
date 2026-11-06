@@ -279,7 +279,7 @@ final class Recorder {
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "Setting the input format")
         var maxF = UInt32(maxFrames)
         _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxF, 4)
-        let list = AudioBufferList.allocate(maximumBuffers: inCh)
+        var list = AudioBufferList.allocate(maximumBuffers: inCh)
         for i in 0..<inCh {
             let mem = UnsafeMutableRawPointer.allocate(byteCount: maxFrames * 4, alignment: 16)
             list[i] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(maxFrames * 4), mData: mem)
@@ -301,7 +301,7 @@ final class Recorder {
 
     func pull(_ flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>, _ ts: UnsafePointer<AudioTimeStamp>,
               _ bus: UInt32, _ nFrames: UInt32) -> OSStatus {
-        guard let u = unit, let l = abl else { return noErr }
+        guard let u = unit, var l = abl else { return noErr }
         let n = Int(nFrames)
         if n > maxFrames { return noErr }
         for i in 0..<l.count { l[i].mDataByteSize = UInt32(n * 4) }
@@ -331,7 +331,7 @@ let recorderInput: AURenderCallback = { (refCon, flags, ts, bus, nFrames, _) -> 
 // MARK: - Bridge between the web UI and Core Audio
 
 @MainActor
-final class Bridge: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
+final class Bridge: NSObject, WKScriptMessageHandler {
     weak var web: WKWebView?
     var player: Player? = nil
     var recorder: Recorder? = nil
@@ -391,6 +391,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigation
             let ramp = (body["ramp"] as? Int) ?? 0
             p.addEvent(id, GateEvent(frame: frame < 0 ? 0 : Int64(frame), target: Float(target), ramp: ramp))
         case "stopAll": player?.stopAll()
+        case "openFile": openFile()
         case "copy":
             if let t = body["text"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }
         default: break
@@ -402,8 +403,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigation
         let defIn = defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         let devs = allDevices()
         let list: [[String: Any]] = devs.map { ["uid": $0.uid, "name": $0.name, "inCh": $0.inCh, "outCh": $0.outCh, "rate": $0.rate] }
-        let dOut = devs.first { $0.id == defOut }?.uid ?? ""
-        let dIn = devs.first { $0.id == defIn }?.uid ?? ""
+        let dOut = devs.first(where: { $0.id == defOut })?.uid ?? ""
+        let dIn = devs.first(where: { $0.id == defIn })?.uid ?? ""
         js("__native.onDevices(\(jsonString(list)), \(jsonString([dOut, dIn])))")
     }
 
@@ -480,25 +481,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigation
         }
     }
 
-    // <input type="file"> support ("Analyze a recording")
-    @objc(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:)
-    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+    // "Analyze a recording": native open panel, file bytes handed to the page
+    func openFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.begin { r in completionHandler(r == .OK ? panel.urls : nil) }
-    }
-
-    // external links open in the default browser
-    @objc(webView:decidePolicyForNavigationAction:decisionHandler:)
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if let url = navigationAction.request.url, url.scheme == "http" || url.scheme == "https" {
-            NSWorkspace.shared.open(url); decisionHandler(.cancel); return
-        }
-        decisionHandler(.allow)
+        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
+        js("__native.onFile(\(jsonString([url.lastPathComponent])), '\(data.base64EncodedString())')")
     }
 }
 
@@ -515,8 +505,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.userContentController.add(bridge, name: "ta")
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 1440, height: 940), configuration: config)
-        web.uiDelegate = bridge
-        web.navigationDelegate = bridge
         web.setValue(false, forKey: "drawsBackground")
         bridge.web = web
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 940),

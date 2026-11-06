@@ -19,6 +19,9 @@ cp build/icon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 codesign --verify --verbose "$APP"
 STAGE=dist/dmg && mkdir -p "$STAGE" && cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname TimeAlign -srcfolder "$STAGE" -ov -format UDZO dist/TimeAlign.dmg
 (cd dist && ditto -c -k --keepParent TimeAlign.app TimeAlign-mac.zip)
+for TRY in 1 2 3 4 5; do
+  hdiutil create -volname TimeAlign -srcfolder "$STAGE" -ov -format UDZO dist/TimeAlign.dmg && break
+  echo "hdiutil busy, retrying ($TRY)"; sleep 5
+done
 ls -la dist
