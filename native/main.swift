@@ -279,7 +279,7 @@ final class Recorder {
                                        UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "Setting the input format")
         var maxF = UInt32(maxFrames)
         _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxF, 4)
-        var list = AudioBufferList.allocate(maximumBuffers: inCh)
+        let list = AudioBufferList.allocate(maximumBuffers: inCh)
         for i in 0..<inCh {
             let mem = UnsafeMutableRawPointer.allocate(byteCount: maxFrames * 4, alignment: 16)
             list[i] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(maxFrames * 4), mData: mem)
@@ -301,7 +301,7 @@ final class Recorder {
 
     func pull(_ flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>, _ ts: UnsafePointer<AudioTimeStamp>,
               _ bus: UInt32, _ nFrames: UInt32) -> OSStatus {
-        guard let u = unit, var l = abl else { return noErr }
+        guard let u = unit, let l = abl else { return noErr }
         let n = Int(nFrames)
         if n > maxFrames { return noErr }
         for i in 0..<l.count { l[i].mDataByteSize = UInt32(n * 4) }
@@ -554,8 +554,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    app.run()
+}
