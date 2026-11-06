@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TimeAlign — speaker time alignment</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%23161b22%22/%3E%3Cpath d=%22M3 13h10M8 3v10%22 stroke=%22%23ffb547%22 stroke-width=%222%22/%3E%3C/svg%3E">
+<style>/*CSS*/</style>
+</head>
+<body class="role-mac">
+<header class="top">
+  <div class="brand"><span class="logo">⟂</span> TimeAlign <small>dual-FFT speaker time alignment</small></div>
+  <div class="seg" id="roleSeg">
+    <button data-role="mac" class="on">This Mac plays &amp; listens</button>
+    <button data-role="listen">This device only listens (iPhone)</button>
+  </div>
+  <button id="stopBtn" class="stop" title="Silence all outputs (Esc)">■ STOP</button>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main class="grid">
+  <section class="col">
+    <div class="card" id="cardAudio">
+      <h2>1 · Audio</h2>
+      <button id="startBtn" class="primary big">Start audio</button>
+      <div id="audioCfg" hidden>
+        <div class="row mac-only"><label style="flex:1">Output: signal to the console (USB interface or Dante Virtual Soundcard)
+          <select id="outSel"></select></label><button id="refreshDev" title="Re-scan audio devices">↻ Refresh</button></div>
+        <div class="hint warn" id="devMsg" hidden></div>
+        <div class="hint mac-only" id="outInfo"></div>
+        <div class="row"><label style="flex:1">Input: measurement mic
+          <select id="inSel"></select></label></div>
+        <div class="row">
+          <label>Mic is on input <select id="micCh"><option value="1">1</option><option value="2">2</option></select></label>
+          <label class="mac-only">Timing reference <select id="refMode">
+            <option value="internal">Internal (no cable)</option>
+            <option value="loop">Loop-back on the other input</option></select></label>
+          <label class="mac-only" id="refOutLbl" hidden>Loop-back out ch <input id="refOut" type="number" min="1" max="32" value="2"></label>
+        </div>
+        <div class="row mac-only"><label style="flex:1">Noise level <span id="levelTxt" class="mono"></span>
+          <input id="level" type="range" min="-50" max="0" step="1" value="-18"></label></div>
+        <div class="meter"><div id="meterBar"></div><span id="meterTxt">mic — dBFS</span></div>
+        <div class="hint mac-only">Dante mic: choose <b>Dante Virtual Soundcard</b> as Input and, in Dante Controller, route the mic’s preamp channel to DVS receive channel 1 (or 2). The browser can only read inputs 1–2 of any device. DVS for both input and output keeps everything on one clock (best accuracy).</div>
+        <div class="hint" id="ctxInfo"></div>
+      </div>
+    </div>
+
+    <div class="card" id="cardZones">
+      <h2>2 · Speakers / mix sends</h2>
+      <div style="overflow-x:auto"><table class="zones">
+        <thead><tr><th></th><th>Name</th><th class="mac-only">Out ch</th><th>Type</th><th title="Delay currently set in the console for this output">Console now (ms)</th><th class="mac-only"></th><th></th></tr></thead>
+        <tbody id="zoneBody"></tbody>
+      </table></div>
+      <div class="row">
+        <button id="addZone">+ Add speaker</button>
+        <button id="presetBtn">Preset: L / R / Subs / 2 delays</button>
+      </div>
+      <div class="row">
+        <label>Sub crossover (Hz) <input id="xo" type="number" min="40" max="250" value="100"></label>
+        <label>Precedence offset for delays (ms) <input id="haas" type="number" min="0" max="30" step="0.5" value="5"></label>
+      </div>
+      <div class="hint">“Out ch” = the output channel feeding that speaker’s mix send (Dante VS / USB channel number). Use “1,2” for a pair.
+        Precedence offset makes the mains arrive first so the sound stays anchored to the stage.</div>
+      <details class="mac-only"><summary>Phone setup code</summary>
+        <div class="hint">Copy here, paste on the iPhone (Universal Clipboard) so it uses the same speaker names.</div>
+        <div class="row"><input id="codeOut" readonly style="flex:1"><button id="copyCode">Copy</button></div>
+      </details>
+      <details class="listen-only" open><summary>Setup code from the Mac</summary>
+        <div class="row"><input id="codeIn" placeholder="TA1:…" style="flex:1"><button id="applyCode">Apply</button></div>
+        <div class="hint">Optional. Without it, speakers show as “Send 1, Send 2…” in the Mac’s order.</div>
+      </details>
+    </div>
+
+    <div class="card" id="cardEnv">
+      <h2>3 · Room conditions</h2>
+      <div class="row">
+        <label>Temperature <span><input id="temp" type="number" step="1" value="72"> <select id="tUnit"><option>°F</option><option>°C</option></select></span></label>
+        <label>Humidity (%) <input id="rh" type="number" min="0" max="100" value="45"></label>
+        <label>Distances in <select id="dUnit"><option>ft</option><option>m</option></select></label>
+      </div>
+      <div class="hint" id="cInfo"></div>
+      <label class="chk"><input type="checkbox" id="showAdj"> Also give delays for show conditions (hot, full room)</label>
+      <div class="row" id="showRow" hidden>
+        <label>Show temperature <input id="showTemp" type="number" value="82"></label>
+        <label>Show humidity (%) <input id="showRh" type="number" min="0" max="100" value="60"></label>
+      </div>
+      <details><summary>Distance → delay calculator</summary>
+        <div class="row"><label>Distance between speakers (path difference) <input id="calcDist" type="number" step="0.1" value="40"></label></div>
+        <div class="calcOut" id="calcOut"></div>
+      </details>
+    </div>
+  </section>
+
+  <section class="col">
+    <div class="card" id="cardMeasure">
+      <h2>4 · Measure</h2>
+      <div class="seg" id="modeSeg">
+        <button data-mode="auto" class="on">Auto: route noise to each send</button>
+        <button data-mode="manual">Manual: I’ll say which mix is on</button>
+      </div>
+      <div id="autoPane">
+        <div class="row">
+          <label>Mic position name <input id="posName" type="text" value="Position 1"></label>
+          <label>Length <select id="speed">
+            <option value="4">Fast (~3 s per speaker)</option>
+            <option value="6">Normal (~4 s)</option>
+            <option value="10">Noisy room (~7 s)</option></select></label>
+        </div>
+        <div class="mac-only">
+          <button id="measureBtn" class="primary big">▶ Measure checked speakers</button>
+          <button id="playSeqBtn" title="Plays the same sequence without listening, for the iPhone or a recorder">Play sequence only (iPhone / recorder listening)</button>
+        </div>
+        <div class="listen-only">
+          <button id="listenBtn" class="primary big">● Listen</button>
+          <span class="hint">Tap Listen, then press “Play sequence only” on the Mac.</span>
+        </div>
+        <div class="row"><label class="filebtn">Analyze a recording (Voice Memo, WAV)… <input type="file" id="fileIn" accept="audio/*,.m4a,.wav,.mp3,.aif,.aiff,.caf"></label></div>
+      </div>
+      <div id="manualPane" hidden>
+        <div class="row mac-only">
+          <label>Noise out ch <input id="manCh" type="text" value="1,2" style="width:90px"></label>
+          <button id="manNoise">▶ Start noise</button>
+        </div>
+        <div class="row listen-only"><button id="manListen">● Start listening</button></div>
+        <div class="hint">At the console, unmute ONE speaker, tap its name below, then Capture. Repeat for each. Keep the noise running between captures.</div>
+        <div id="manZones" class="zoneBtns"></div>
+        <button id="captureBtn" class="primary big">● Capture</button>
+        <button id="newPosBtn">New position</button>
+      </div>
+      <div class="progress"><div id="progBar"></div></div>
+      <div id="progTxt" class="hint">Ready.</div>
+      <div class="live">
+        <canvas id="liveCv"></canvas>
+        <div class="liveTxt">
+          <div class="hint">Live arrival vs reference</div>
+          <div class="big" id="liveDelay">—</div>
+          <div class="hint" id="liveInfo">Start audio to see the live impulse response.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="cardResults">
+      <h2>5 · Delays for your console</h2>
+      <div class="row">
+        <label>Measurement <select id="snapSel"><option value="">— none yet —</option></select></label>
+        <label class="chk" title="Use every position that has both the reference main and the sub"><input type="checkbox" id="avgSub" checked> Average sub alignment over all positions</label>
+        <button id="copyRes">Copy results</button>
+        <button id="clearRes">Clear all</button>
+      </div>
+      <div id="todo" class="todo"></div>
+      <div id="notes" class="hint"></div>
+      <div style="overflow-x:auto">
+        <table class="res">
+          <thead><tr><th>Speaker</th><th>Type</th><th class="num">Arrival vs ref</th><th class="num">≈ distance</th><th class="num">Quality</th><th class="num">Change</th><th class="num">Set console to</th><th class="num" id="thShow" hidden>Show cond.</th></tr></thead>
+          <tbody id="resBody"></tbody>
+        </table>
+      </div>
+      <div class="row">
+        <div class="seg small" id="plotSeg">
+          <button data-p="etc" class="on">Arrivals (ETC)</button>
+          <button data-p="mag">Magnitude</button>
+          <button data-p="phase">Phase</button>
+          <button data-p="sub">Sub ↔ Main sum</button>
+        </div>
+      </div>
+      <canvas id="plotCv"></canvas>
+      <div id="plotLegend" class="legend"></div>
+    </div>
+
+    <div class="card help">
+      <h2>How to use</h2>
+      <ol>
+        <li><b>Start audio</b> and allow the microphone. Pick Dante Virtual Soundcard (or your USB interface) as Output, and your measurement mic as Input — a USB mic/interface, or Dante Virtual Soundcard with the mic routed to DVS receive channel 1. Set the macOS mic mode to Standard (no Voice Isolation). If a device is missing, press ↻ Refresh.</li>
+        <li>List each speaker / mix send, the output channel that feeds it, and its type. Enter what delay is in the console now (0 if none).</li>
+        <li>Put the mic where the speakers you’re aligning overlap (for a delay speaker: where its coverage meets the mains; for subs: a typical listening spot, ideally 2–3 spots).</li>
+        <li><b>Auto</b> plays pink noise into each send in turn and measures every speaker in one go. <b>Manual</b> plays one noise feed and you unmute one speaker at a time at the console and tell the app which one is on.</li>
+        <li>Type the big numbers into your console. Measure again to verify: everything should read ≈0 change.</li>
+      </ol>
+      <p><b>iPhone as a wireless mic:</b> open this page on the iPhone (it needs an https:// address), choose “This device only listens”, tap Listen, then on the Mac press “Play sequence only”. No cable or network link between the two is needed; the app removes the clock difference between the devices. Or record the sequence with Voice Memos, AirDrop it to the Mac, and use “Analyze a recording”.</p>
+      <p><b>How it computes:</b> the same dual-channel FFT method Smaart uses. Transfer function H = Gxy/Gxx against a known pink-noise reference (or a loop-back), complex averaging with coherence, impulse response by inverse FFT, and a delay finder on the impulse-response peak (first strong arrival). Subs are aligned by phase at the crossover, choosing the delay and polarity that sum loudest across a 1.5-octave band.</p>
+    </div>
+  </section>
+</main>
+<script>/*DSP*/</script>
+<script>const WORKLET_SRC = /*WORKLET*/;</script>
+<script>/*APP*/</script>
+</body>
+</html>

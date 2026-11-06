@@ -1,0 +1,43 @@
+name: Build Mac app + iPhone page
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+jobs:
+  mac-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1.${{ github.run_number }}
+          name: TimeAlign 1.1.${{ github.run_number }}
+          make_latest: true
+          body: |
+            Download TimeAlign-…-arm64.dmg for Apple Silicon Macs (M1/M2/M3/M4), the other .dmg for Intel Macs.
+            First launch: System Settings > Privacy & Security > "Open Anyway".
+          files: |
+            dist/*.dmg
+            dist/*.zip
+  iphone-page:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app
+      - id: deploy
+        uses: actions/deploy-pages@v4
