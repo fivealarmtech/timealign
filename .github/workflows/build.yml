@@ -9,7 +9,7 @@ permissions:
   id-token: write
 jobs:
   mac-app:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build TimeAlign.app (native Swift + Core Audio)
