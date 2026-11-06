@@ -1,0 +1,35 @@
+swift-driver version: 1.148.6 Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)
+Target: arm64-apple-macosx26.0
+== compiling arm64
+native/main.swift:558:16: error: call to main actor-isolated initializer 'init()' in a synchronous nonisolated context [#ActorIsolatedCall]
+496 | 
+497 | @MainActor
+498 | final class AppDelegate: NSObject, NSApplicationDelegate {
+    |                                                          `- note: calls to initializer 'init()' from outside of its actor context are implicitly asynchronous
+499 |     var window: NSWindow!
+500 |     let bridge = Bridge()
+    :
+556 | 
+557 | let app = NSApplication.shared
+558 | let delegate = AppDelegate()
+    |                `- error: call to main actor-isolated initializer 'init()' in a synchronous nonisolated context [#ActorIsolatedCall]
+559 | app.delegate = delegate
+560 | app.setActivationPolicy(.regular)
+
+native/main.swift:282:13: warning: variable 'list' was never mutated; consider changing to 'let' constant
+280 |         var maxF = UInt32(maxFrames)
+281 |         _ = AudioUnitSetProperty(u, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxF, 4)
+282 |         var list = AudioBufferList.allocate(maximumBuffers: inCh)
+    |             `- warning: variable 'list' was never mutated; consider changing to 'let' constant
+283 |         for i in 0..<inCh {
+284 |             let mem = UnsafeMutableRawPointer.allocate(byteCount: maxFrames * 4, alignment: 16)
+
+native/main.swift:304:33: warning: variable 'l' was never mutated; consider changing to 'let' constant
+302 |     func pull(_ flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>, _ ts: UnsafePointer<AudioTimeStamp>,
+303 |               _ bus: UInt32, _ nFrames: UInt32) -> OSStatus {
+304 |         guard let u = unit, var l = abl else { return noErr }
+    |                                 `- warning: variable 'l' was never mutated; consider changing to 'let' constant
+305 |         let n = Int(nFrames)
+306 |         if n > maxFrames { return noErr }
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
