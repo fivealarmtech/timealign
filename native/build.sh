@@ -10,11 +10,12 @@ swiftc --version
 for ARCH in arm64 x86_64; do
   echo "== compiling $ARCH"
   swiftc -O -swift-version 5 -target "$ARCH-apple-macos11.0" -o "dist/TimeAlign-$ARCH" native/main.swift \
-    -framework Cocoa -framework WebKit -framework CoreAudio -framework AudioToolbox -framework AVFoundation
+    -framework Cocoa -framework WebKit -framework CoreAudio -framework AudioToolbox -framework AVFoundation -framework Network -framework CoreImage -framework Security
 done
 lipo -create -output "$APP/Contents/MacOS/TimeAlign" dist/TimeAlign-arm64 dist/TimeAlign-x86_64
 sed "s/BUILDNUM/$BUILD/" native/Info.plist > "$APP/Contents/Info.plist"
 cp app/index.html "$APP/Contents/Resources/index.html"
+cp native/mic.html "$APP/Contents/Resources/mic.html"
 cp build/icon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 codesign --verify --verbose "$APP"

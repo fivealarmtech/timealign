@@ -38,6 +38,21 @@
         </div>
         <div class="row mac-only"><label style="flex:1">Noise level <span id="levelTxt" class="mono"></span>
           <input id="level" type="range" min="-50" max="0" step="1" value="-18"></label></div>
+        <div id="remotePanel" class="remote" hidden>
+          <div class="qrs">
+            <div class="qr"><img id="qrLive" alt="Live mic QR code"><div><b>Live mic</b><br>Scan with the iPhone camera</div><div class="mono url" id="urlLive"></div></div>
+            <div class="qr"><img id="qrSetup" alt="iPhone setup QR code"><div><b>First time on an iPhone</b><br>Install TimeAlign’s certificate once</div><div class="mono url" id="urlSetup"></div></div>
+          </div>
+          <div id="remoteState" class="hint">Waiting for the iPhone…</div>
+          <details><summary>First-time iPhone setup (about a minute, once)</summary>
+            <ol class="hint">
+              <li>Scan <b>First time</b> with the iPhone camera, tap the link, tap <b>Install certificate</b> → <b>Allow</b>.</li>
+              <li>iPhone <b>Settings → Profile Downloaded → Install</b>.</li>
+              <li><b>Settings → General → About → Certificate Trust Settings</b> → turn on <b>TimeAlign Local CA</b>.</li>
+              <li>Scan <b>Live mic</b>, tap <b>Start microphone</b>, allow the mic. Same Wi-Fi as this Mac.</li>
+            </ol>
+          </details>
+        </div>
         <div class="meter"><div id="meterBar"></div><span id="meterTxt">mic — dBFS</span></div>
         <div class="hint mac-only">Dante mic: choose <b>Dante Virtual Soundcard</b> as Input and, in Dante Controller, route the mic’s preamp channel to DVS receive channel 1 (or 2). In a browser only inputs 1–2 are reachable; the Mac app can use any input channel. DVS for both input and output keeps everything on one clock (best accuracy).</div>
         <div class="hint" id="ctxInfo"></div>

@@ -7,6 +7,9 @@ import WebKit
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import Network
+import CoreImage
+import Security
 
 let SR: Double = 48000
 let PERIOD = 32768
@@ -328,6 +331,327 @@ let recorderInput: AURenderCallback = { (refCon, flags, ts, bus, nFrames, _) -> 
     return r.pull(flags, ts, bus, nFrames)
 }
 
+
+// MARK: - Live iPhone mic: local certificate authority + HTTPS server
+// iOS only allows the microphone on secure (https) pages and rejects untrusted certificates, so
+// TimeAlign keeps its own small certificate authority. The iPhone installs that CA once (setup QR),
+// after which the live-mic page (served by this Mac over https on the local network) just works.
+
+func localIPv4s() -> [String] {
+    var found: [(String, String)] = []
+    var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
+    guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+    defer { freeifaddrs(ifaddr) }
+    var cur: UnsafeMutablePointer<ifaddrs>? = first
+    while let p = cur {
+        let flags = Int32(p.pointee.ifa_flags)
+        if let sa = p.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+           (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 {
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let ip = String(cString: host)
+                let name = String(cString: p.pointee.ifa_name)
+                if !ip.hasPrefix("169.254.") && !found.contains(where: { $0.1 == ip }) { found.append((name, ip)) }
+            }
+        }
+        cur = p.pointee.ifa_next
+    }
+    // Wi-Fi / Ethernet (en*) first
+    found.sort { ($0.0.hasPrefix("en") ? 0 : 1, $0.0) < ($1.0.hasPrefix("en") ? 0 : 1, $1.0) }
+    return found.map { $0.1 }
+}
+
+final class CertManager {
+    let dir: URL
+    init() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        dir = base.appendingPathComponent("TimeAlign/certs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+    private func path(_ n: String) -> String { return dir.appendingPathComponent(n).path }
+
+    private func openssl(_ args: [String]) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        p.arguments = args
+        p.currentDirectoryURL = dir
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        if p.terminationStatus != 0 {
+            throw AudioError(msg: "Certificate setup failed (openssl \(args.first ?? "")): \(String(decoding: out, as: UTF8.self).prefix(300))")
+        }
+    }
+
+    // Returns the server identity for these SAN entries and the CA certificate (DER) to install on the iPhone.
+    func ensure(sans: [String]) throws -> (SecIdentity, Data) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: path("ca.key")) || !fm.fileExists(atPath: path("ca.der")) {
+            let host = (Host.current().localizedName ?? "Mac").replacingOccurrences(of: "\n", with: " ")
+            let cnf = "[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = TimeAlign Local CA (\(host))\n[v3_ca]\nbasicConstraints = critical,CA:TRUE\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\n"
+            try cnf.write(toFile: path("ca.cnf"), atomically: true, encoding: .utf8)
+            try openssl(["genrsa", "-out", "ca.key", "2048"])
+            try openssl(["req", "-x509", "-new", "-key", "ca.key", "-sha256", "-days", "3650", "-out", "ca.crt", "-config", "ca.cnf", "-extensions", "v3_ca"])
+            try openssl(["x509", "-in", "ca.crt", "-outform", "der", "-out", "ca.der"])
+            try? fm.removeItem(atPath: path("leaf.p12"))
+        }
+        let sanLine = sans.joined(separator: ",")
+        let oldSan = (try? String(contentsOfFile: path("leaf.san"), encoding: .utf8)) ?? ""
+        var age = Double.infinity
+        if let attrs = try? fm.attributesOfItem(atPath: path("leaf.p12")), let d = attrs[.creationDate] as? Date { age = Date().timeIntervalSince(d) }
+        if oldSan != sanLine || age > 300 * 86400 || !fm.fileExists(atPath: path("leaf.p12")) {
+            try makeLeaf(sanLine)
+        }
+        var result = try loadIdentity()
+        if result == nil { try makeLeaf(sanLine); result = try loadIdentity() }
+        guard let identity = result else { throw AudioError(msg: "Could not load the TimeAlign certificate.") }
+        let caDER = try Data(contentsOf: URL(fileURLWithPath: path("ca.der")))
+        return (identity, caDER)
+    }
+
+    private func makeLeaf(_ sanLine: String) throws {
+        let ext = "basicConstraints = CA:FALSE\nkeyUsage = critical,digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = \(sanLine)\n"
+        try ext.write(toFile: path("leaf.ext"), atomically: true, encoding: .utf8)
+        try openssl(["genrsa", "-out", "leaf.key", "2048"])
+        try openssl(["req", "-new", "-key", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=TimeAlign"])
+        try openssl(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial",
+                     "-out", "leaf.crt", "-days", "397", "-sha256", "-extfile", "leaf.ext"])
+        try? FileManager.default.removeItem(atPath: path("leaf.p12"))
+        try openssl(["pkcs12", "-export", "-out", "leaf.p12", "-inkey", "leaf.key", "-in", "leaf.crt", "-certfile", "ca.crt",
+                     "-passout", "pass:timealign", "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES", "-macalg", "sha1"])
+        try sanLine.write(toFile: path("leaf.san"), atomically: true, encoding: .utf8)
+    }
+
+    private func loadIdentity() throws -> SecIdentity? {
+        let p12 = try Data(contentsOf: URL(fileURLWithPath: path("leaf.p12")))
+        var opts: [String: Any] = [kSecImportExportPassphrase as String: "timealign"]
+        if #available(macOS 15.0, *) { opts[kSecImportToMemoryOnly as String] = true }
+        var items: CFArray? = nil
+        let st = SecPKCS12Import(p12 as CFData, opts as CFDictionary, &items)
+        guard st == errSecSuccess, let arr = items as? [[String: Any]], let first = arr.first,
+              let idRef = first[kSecImportItemIdentity as String] else { return nil }
+        return (idRef as! SecIdentity)
+    }
+}
+
+final class Flag { var value = false }
+
+final class HTTPConn {
+    let conn: NWConnection
+    let secure: Bool
+    weak var server: RemoteServer?
+    var buf = Data()
+    var closed = false
+
+    init(_ c: NWConnection, secure: Bool, server: RemoteServer) { conn = c; self.secure = secure; self.server = server }
+
+    var peer: String {
+        if case let .hostPort(host, _) = conn.endpoint { return "\(host)" }
+        return ""
+    }
+
+    func start(on queue: DispatchQueue) {
+        conn.stateUpdateHandler = { [weak self] st in
+            switch st {
+            case .failed(_), .cancelled: self?.close()
+            default: break
+            }
+        }
+        conn.start(queue: queue)
+        receive()
+    }
+
+    func receive() {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
+            guard let self = self else { return }
+            if let d = data, !d.isEmpty { self.buf.append(d); self.process() }
+            if isComplete || error != nil { self.close(); return }
+            if !self.closed { self.receive() }
+        }
+    }
+
+    func close() {
+        if closed { return }
+        closed = true
+        conn.cancel()
+        server?.drop(self)
+    }
+
+    func process() {
+        let sep = Data([13, 10, 13, 10])
+        while !closed {
+            guard let r = buf.range(of: sep) else {
+                if buf.count > 65536 { close() }
+                return
+            }
+            let head = String(decoding: buf.subdata(in: 0..<r.lowerBound), as: UTF8.self)
+            let lines = head.components(separatedBy: "\r\n")
+            let first = (lines.first ?? "").split(separator: " ")
+            if first.count < 2 { close(); return }
+            var length = 0
+            for line in lines.dropFirst() {
+                if let i = line.firstIndex(of: ":"), line[..<i].lowercased() == "content-length" {
+                    length = Int(line[line.index(after: i)...].trimmingCharacters(in: .whitespaces)) ?? 0
+                }
+            }
+            if length < 0 || length > 4_000_000 { close(); return }
+            let bodyStart = r.upperBound
+            if buf.count - bodyStart < length { return }
+            let body = buf.subdata(in: bodyStart..<(bodyStart + length))
+            buf = buf.subdata(in: (bodyStart + length)..<buf.count)
+            server?.handle(self, method: String(first[0]), target: String(first[1]), body: body)
+        }
+    }
+
+    func send(_ status: String, _ type: String, _ body: Data, _ extra: [String: String] = [:]) {
+        var head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n"
+        for (k, v) in extra { head += "\(k): \(v)\r\n" }
+        head += "\r\n"
+        var out = Data(head.utf8)
+        out.append(body)
+        conn.send(content: out, completion: .contentProcessed({ _ in }))
+    }
+}
+
+final class RemoteServer {
+    let queue = DispatchQueue(label: "timealign.remote")
+    var tls: NWListener? = nil
+    var http: NWListener? = nil
+    var tlsPort: UInt16 = 0
+    var httpPort: UInt16 = 0
+    let token: String
+    var micPage = Data()
+    var caDER = Data()
+    var liveURL = ""
+    var status = "Waiting for TimeAlign…"            // touched on queue only
+    var conns: [ObjectIdentifier: HTTPConn] = [:]    // queue only
+    var onAudio: (@Sendable (Int64, Data, String) -> Void)? = nil
+
+    init() {
+        var bytes = [UInt8](repeating: 0, count: 8)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        token = bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func start(identity: SecIdentity, caDER: Data, micPage: Data) throws {
+        self.caDER = caDER
+        self.micPage = micPage
+        let tlsOpts = NWProtocolTLS.Options()
+        if let sid = sec_identity_create(identity) { sec_protocol_options_set_local_identity(tlsOpts.securityProtocolOptions, sid) }
+        sec_protocol_options_set_min_tls_protocol_version(tlsOpts.securityProtocolOptions, .TLSv12)
+        let (t, tp) = try listen(NWParameters(tls: tlsOpts, tcp: NWProtocolTCP.Options()), preferred: 8443, secure: true)
+        let (h, hp) = try listen(NWParameters(tls: nil, tcp: NWProtocolTCP.Options()), preferred: 8080, secure: false)
+        tls = t; tlsPort = tp; http = h; httpPort = hp
+    }
+
+    private func listen(_ params: NWParameters, preferred: UInt16, secure: Bool) throws -> (NWListener, UInt16) {
+        params.allowLocalEndpointReuse = true
+        for port in [preferred, 0] {
+            let l: NWListener
+            if port == 0 { l = try NWListener(using: params) }
+            else { l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port) ?? .any) }
+            let sem = DispatchSemaphore(value: 0)
+            let ready = Flag()
+            l.stateUpdateHandler = { st in
+                switch st {
+                case .ready: ready.value = true; sem.signal()
+                case .failed(_): sem.signal()
+                default: break
+                }
+            }
+            l.newConnectionHandler = { [weak self] c in self?.accept(c, secure: secure) }
+            l.start(queue: queue)
+            _ = sem.wait(timeout: .now() + 3)
+            if ready.value, let p = l.port?.rawValue { return (l, p) }
+            l.cancel()
+        }
+        throw AudioError(msg: "Could not open a network port for the iPhone mic.")
+    }
+
+    func accept(_ c: NWConnection, secure: Bool) {
+        let h = HTTPConn(c, secure: secure, server: self)
+        conns[ObjectIdentifier(h)] = h
+        h.start(on: queue)
+    }
+
+    func drop(_ h: HTTPConn) { conns[ObjectIdentifier(h)] = nil }
+
+    func setStatus(_ s: String) { queue.async { self.status = s } }
+
+    func stop() {
+        tls?.cancel(); http?.cancel(); tls = nil; http = nil
+        queue.async { for (_, c) in self.conns { c.conn.cancel() }; self.conns.removeAll() }
+    }
+
+    func handle(_ c: HTTPConn, method: String, target: String, body: Data) {
+        let parts = target.split(separator: "?", maxSplits: 1)
+        let path = parts.isEmpty ? "/" : String(parts[0])
+        var q: [String: String] = [:]
+        if parts.count > 1 {
+            for kv in parts[1].split(separator: "&") {
+                let p = kv.split(separator: "=", maxSplits: 1)
+                if p.count == 2 { q[String(p[0])] = String(p[1]).removingPercentEncoding ?? String(p[1]) }
+            }
+        }
+        if c.secure {
+            if method == "GET" && (path == "/" || path == "/mic") { c.send("200 OK", "text/html; charset=utf-8", micPage); return }
+            if method == "POST" && path == "/audio" {
+                if q["k"] != token { c.send("403 Forbidden", "text/plain", Data("old QR code".utf8)); return }
+                let f = Int64(q["f"] ?? "") ?? -1
+                if f >= 0 && body.count >= 2 { onAudio?(f, body, c.peer) }
+                let json = (try? JSONSerialization.data(withJSONObject: ["ok": true, "status": status])) ?? Data("{}".utf8)
+                c.send("200 OK", "application/json", json)
+                return
+            }
+            c.send("404 Not Found", "text/plain", Data("not found".utf8))
+            return
+        }
+        if path == "/ca.crt" {
+            c.send("200 OK", "application/x-x509-ca-cert", caDER, ["Content-Disposition": "attachment; filename=\"TimeAlign-CA.crt\""])
+            return
+        }
+        if path == "/" { c.send("200 OK", "text/html; charset=utf-8", Data(setupPage().utf8)); return }
+        c.send("404 Not Found", "text/plain", Data("not found".utf8))
+    }
+
+    func setupPage() -> String {
+        return """
+        <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>TimeAlign iPhone setup</title><style>
+        body{margin:0;padding:20px;background:#0e1116;color:#e6edf3;font:16px/1.5 -apple-system,sans-serif}
+        h1{font-size:20px} b{color:#ffb547} ol{padding-left:20px} li{margin:10px 0}
+        a.btn{display:block;text-align:center;background:#ffb547;color:#1b1300;font-weight:700;padding:16px;border-radius:12px;text-decoration:none;margin:14px 0}
+        a.btn2{background:#4fc3f7;color:#001521} .dim{color:#8b98a7;font-size:13px}
+        </style></head><body>
+        <h1>Set up this iPhone for TimeAlign (one time)</h1>
+        <ol>
+        <li>Tap <b>Install certificate</b> below, then tap <b>Allow</b>.</li>
+        <li>Open <b>Settings</b> → <b>Profile Downloaded</b> (near the top) → <b>Install</b> → enter your passcode → <b>Install</b>.</li>
+        <li>Open <b>Settings → General → About → Certificate Trust Settings</b> and turn on <b>TimeAlign Local CA</b>.</li>
+        <li>Come back and tap <b>Open live mic</b> (or scan the Live mic QR on the Mac).</li>
+        </ol>
+        <a class="btn" href="/ca.crt">Install certificate</a>
+        <a class="btn btn2" href="\(liveURL)">Open live mic</a>
+        <p class="dim">The certificate only lets this iPhone trust TimeAlign running on your own Mac.
+        After this, just scan the Live mic QR code. Same Wi-Fi network as the Mac is required.</p>
+        </body></html>
+        """
+    }
+}
+
+func qrDataURL(_ text: String) -> String {
+    guard let f = CIFilter(name: "CIQRCodeGenerator") else { return "" }
+    f.setValue(Data(text.utf8), forKey: "inputMessage")
+    f.setValue("M", forKey: "inputCorrectionLevel")
+    guard let img = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return "" }
+    let rep = NSBitmapImageRep(ciImage: img)
+    guard let png = rep.representation(using: .png, properties: [:]) else { return "" }
+    return "data:image/png;base64," + png.base64EncodedString()
+}
+
 // MARK: - Bridge between the web UI and Core Audio
 
 @MainActor
@@ -339,6 +663,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     var seqs = [Int: UnsafeMutablePointer<Float>]()
     let chunk = 2048
     var pendingOpen: [String: Any]? = nil
+    var server: RemoteServer? = nil
+    var certs = CertManager()
+    var remoteActive = false
 
     override init() {
         super.init()
@@ -391,6 +718,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let ramp = (body["ramp"] as? Int) ?? 0
             p.addEvent(id, GateEvent(frame: frame < 0 ? 0 : Int64(frame), target: Float(target), ramp: ramp))
         case "stopAll": player?.stopAll()
+        case "phoneStatus": if let t = body["text"] as? String { server?.setStatus(t) }
         case "openFile": openFile()
         case "copy":
             if let t = body["text"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }
@@ -417,6 +745,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     func reply(_ o: [String: Any]) { js("__native.onOpen(\(jsonString(o)))") }
 
     func openAudio(_ body: [String: Any]) {
+        let wantsRemote = ((body["in"] as? String) ?? "") == "remote"
+        if !wantsRemote {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: break
         case .notDetermined:
@@ -429,6 +759,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         default:
             reply(["ok": false, "error": "Microphone access is off for TimeAlign. Turn it on in System Settings → Privacy & Security → Microphone, then press Restart audio."])
             return
+        }
         }
         closeAudio()
         let outUID = (body["out"] as? String) ?? ""
@@ -447,6 +778,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 player = p
                 result["outCh"] = d.outCh; result["outName"] = d.name
             }
+            if wantsRemote {
+                let info = try startRemote()
+                for (k, v) in info { result[k] = v }
+                result["inCh"] = 1; result["inName"] = "iPhone (live over Wi-Fi)"; result["micCh"] = 1; result["remote"] = true
+                remoteActive = true
+                reply(result)
+                return
+            }
+            remoteActive = false
             guard let d = devs.first(where: { $0.uid == inUID }), d.inCh > 0 else { throw AudioError(msg: "Choose an input device (your measurement mic).") }
             _ = setNominalRate(d.id, SR)
             let r = Recorder()
@@ -460,6 +800,35 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             closeAudio(); result = ["ok": false, "error": "\(error)"]
         }
         reply(result)
+    }
+
+    func startRemote() throws -> [String: Any] {
+        let ips = localIPv4s()
+        guard let ip = ips.first else { throw AudioError(msg: "This Mac isn't on a network. Join the same Wi-Fi as the iPhone.") }
+        if server == nil {
+            var sans = ips.map { "IP:\($0)" } + ["IP:127.0.0.1", "DNS:localhost"]
+            let hn = ProcessInfo.processInfo.hostName
+            if hn.hasSuffix(".local") { sans.append("DNS:\(hn)") }
+            let (identity, caDER) = try certs.ensure(sans: sans)
+            var page = Data("<html><body>mic page missing</body></html>".utf8)
+            if let u = Bundle.main.url(forResource: "mic", withExtension: "html"), let d = try? Data(contentsOf: u) { page = d }
+            let s = RemoteServer()
+            s.onAudio = { [weak self] f, data, peer in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.remoteAudio(f, data, peer) } }
+            }
+            try s.start(identity: identity, caDER: caDER, micPage: page)
+            server = s
+        }
+        guard let s = server else { throw AudioError(msg: "iPhone mic server failed to start.") }
+        let live = "https://\(ip):\(s.tlsPort)/?k=\(s.token)"
+        let setup = "http://\(ip):\(s.httpPort)/"
+        s.liveURL = live
+        return ["url": live, "setupUrl": setup, "qr": qrDataURL(live), "qrSetup": qrDataURL(setup), "ip": ip]
+    }
+
+    func remoteAudio(_ f: Int64, _ data: Data, _ peer: String) {
+        guard remoteActive else { return }
+        js("__native.onRemote(\(f),'\(data.base64EncodedString())','\(peer)')")
     }
 
     func drain() {
@@ -524,7 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { return true }
-    func applicationWillTerminate(_ notification: Notification) { bridge.closeAudio() }
+    func applicationWillTerminate(_ notification: Notification) { bridge.closeAudio(); bridge.server?.stop() }
 
     func buildMenu() {
         let main = NSMenu()

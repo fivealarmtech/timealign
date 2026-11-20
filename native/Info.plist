@@ -14,6 +14,7 @@
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSLocalNetworkUsageDescription</key><string>TimeAlign receives the live microphone from your iPhone over your Wi-Fi network.</string>
   <key>NSMicrophoneUsageDescription</key><string>TimeAlign listens to your measurement microphone to time-align your speakers.</string>
   <key>NSHumanReadableCopyright</key><string>fivealarmtech</string>
 </dict>

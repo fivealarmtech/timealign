@@ -103,3 +103,12 @@ body.role-mac .listen-only { display: none !important; }
   .todo { grid-template-columns: 1fr 1fr; }
   .todo .t .v { font-size: 22px; }
 }
+
+.remote { margin: 10px 0; padding: 12px; border: 1px solid var(--accent2); border-radius: 10px; background: #0f1a22; }
+.qrs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qr { text-align: center; font-size: 12px; color: var(--dim); }
+.qr b { color: var(--text); }
+.qr img { width: 100%; max-width: 190px; aspect-ratio: 1; background: #fff; padding: 8px; border-radius: 8px; image-rendering: pixelated; display: block; margin: 0 auto 6px; }
+.qr .url { font-size: 10px; word-break: break-all; margin-top: 4px; color: #56626f; }
+
+[hidden] { display: none !important; }

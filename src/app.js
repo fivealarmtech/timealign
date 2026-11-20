@@ -77,6 +77,13 @@
       for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
       analyzeFile({ name: (names || ['recording'])[0], arrayBuffer: async () => u8.buffer }).catch(showErr);
     },
+    onRemote(f, b64, peer) {
+      if (!E.remote) return;
+      const bin = atob(b64), n = bin.length >> 1, x = new Float32Array(n);
+      for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v > 32767) v -= 65536; x[i] = v / 32767; }
+      nat.lastRemote = performance.now(); nat.peer = peer || '';
+      onChunk(f, x, x, true);
+    },
     onChunk(f, micB64, refB64, playFrame) {
       nat.playRef = { frame: playFrame, t: performance.now() };
       onChunk(f, b64f32(micB64), b64f32(refB64), true);
@@ -84,7 +91,35 @@
   };
   const engineOn = () => (NATIVE ? E.native : !!E.ctx);
 
-  function setStatus(t, cls) { const el = $('#progTxt'); el.textContent = t; el.className = 'hint ' + (cls || ''); }
+  function showRemotePanel(r) {
+    const p = $('#remotePanel');
+    if (!r || !r.remote) { p.hidden = true; return; }
+    $('#qrLive').src = r.qr || ''; $('#qrSetup').src = r.qrSetup || '';
+    $('#urlLive').textContent = r.url || ''; $('#urlSetup').textContent = r.setupUrl || '';
+    p.hidden = false;
+    nat.lastRemote = 0;
+    if (!nat.remoteTimer) {
+      nat.remoteTimer = setInterval(() => {
+        if (!E.remote) return;
+        const age = performance.now() - (nat.lastRemote || 0);
+        const el = $('#remoteState');
+        if (nat.lastRemote && age < 1500) { el.innerHTML = `<span class="good">● iPhone connected</span>${nat.peer ? ' (' + esc(nat.peer) + ')' : ''} · streaming live`; el.className = 'hint'; }
+        else if (nat.lastRemote) { el.textContent = 'iPhone stopped sending: check the phone screen is on and the page is open.'; el.className = 'hint warn'; }
+        else { el.textContent = 'Waiting for the iPhone… scan the Live mic code with the iPhone camera.'; el.className = 'hint'; }
+        relayStatus();
+      }, 500);
+    }
+  }
+  // Mirror the Mac's status + live delay onto the phone screen
+  let relayLast = '';
+  function relayStatus() {
+    if (!NATIVE || !E.remote) return;
+    const live = $('#liveDelay').textContent, info = $('#liveInfo').textContent;
+    const t = `${$('#progTxt').textContent}\nLive: ${live}${info ? '  (' + info + ')' : ''}`;
+    if (t !== relayLast) { relayLast = t; natPost({ cmd: 'phoneStatus', text: t }); }
+  }
+
+  function setStatus(t, cls) { const el = $('#progTxt'); el.textContent = t; el.className = 'hint ' + (cls || ''); relayStatus(); }
   function banner(html) { const b = $('#banner'); if (!html) { b.hidden = true; return; } b.innerHTML = html; b.hidden = false; }
 
   async function prepareSequences() {
@@ -98,7 +133,7 @@
 
   function fillMicCh() {
     const sel = $('#micCh');
-    const dev = nat.devices.find((d) => d.uid === S.inId);
+    const dev = S.inId === 'remote' ? { inCh: 1 } : nat.devices.find((d) => d.uid === S.inId);
     const n = NATIVE ? Math.max(1, Math.min(128, (dev && dev.inCh) || 2)) : 2;
     sel.innerHTML = '';
     for (let i = 1; i <= n; i++) { const o = document.createElement('option'); o.value = String(i); o.textContent = String(i); sel.appendChild(o); }
@@ -107,13 +142,15 @@
   }
   async function listDevicesNative() {
     await new Promise((res) => { nat.devWait = res; natPost({ cmd: 'devices' }); setTimeout(res, 3000); });
-    const outs = nat.devices.filter((d) => d.outCh > 0), ins = nat.devices.filter((d) => d.inCh > 0);
+    const outs = nat.devices.filter((d) => d.outCh > 0);
+    const ins = nat.devices.filter((d) => d.inCh > 0)
+      .concat([{ uid: 'remote', name: '📱 iPhone — live mic over Wi-Fi (scan QR)', inCh: 1, outCh: 0, rate: FS }]);
     const rateTxt = (d) => (Math.abs(d.rate - FS) > 1 && d.rate ? ` · ${d.rate / 1000} kHz` : '');
     const fillN = (sel, list, kind, val) => {
       sel.innerHTML = '';
       for (const d of list) {
         const o = document.createElement('option'); o.value = d.uid;
-        o.textContent = `${d.name} — ${kind === 'out' ? d.outCh + ' out' : d.inCh + ' in'}${rateTxt(d)}`;
+        o.textContent = d.uid === 'remote' ? d.name : `${d.name} — ${kind === 'out' ? d.outCh + ' out' : d.inCh + ' in'}${rateTxt(d)}`;
         sel.appendChild(o);
       }
       sel.value = val;
@@ -162,7 +199,7 @@
 
   async function closeEngine() {
     stopAll(true);
-    if (NATIVE) { if (E.native) natPost({ cmd: 'close' }); E.native = false; E.manualOn = false; $('#manNoise').textContent = '▶ Start noise'; return; }
+    if (NATIVE) { if (E.native) natPost({ cmd: 'close' }); E.native = false; E.remote = false; E.manualOn = false; showRemotePanel(null); $('#manNoise').textContent = '▶ Start noise'; return; }
     try { if (E.stream) E.stream.getTracks().forEach((t) => t.stop()); } catch (e) { /* ignore */ }
     try { if (E.ctx) await E.ctx.close(); } catch (e) { /* ignore */ }
     E.ctx = null; E.srcs.clear(); E.stream = null; E.cap = null; E.merger = null; E.manualOn = false;
@@ -181,7 +218,8 @@
       setTimeout(() => res({ ok: false, error: 'No answer from the audio system (if a microphone permission box is showing, answer it, then press Restart audio).' }), 30000);
     });
     if (!r || !r.ok) { setStatus((r && r.error) || 'Could not open the audio devices.', 'bad'); return; }
-    E.native = true; E.nOut = r.outCh || 0; E.inCh = r.inCh || 0;
+    E.native = true; E.nOut = r.outCh || 0; E.inCh = r.inCh || 0; E.remote = !!r.remote;
+    showRemotePanel(r);
     if (!nat.seqSent) { for (const id of ALL_IDS) natPost({ cmd: 'seq', id, data: f32b64(TA.getSequence(id).x) }); nat.seqSent = true; }
     E.an = new TA.Analyzer({ candidates: ALL_IDS, useRef: !!ref });
     if (playback) $('#outInfo').innerHTML = `<b>${esc(r.outName || '')}</b>: ${E.nOut} output channel${E.nOut === 1 ? '' : 's'}`;
@@ -366,7 +404,7 @@
     seq.playing = true;
     $('#stopBtn').classList.add('live');
     if (listen) startSession('auto', { name: S.posName || 'Position', ids: new Set(order) });
-    const total = (endF - nowF) / FS + (listen ? (P / FS + 0.6) : 0);
+    const total = (endF - nowF) / FS + (listen ? (P / FS + 0.6 + (E.remote ? 2.0 : 0)) : 0);
     const t0 = pb.now() / FS;
     seq.timer = setInterval(() => {
       const f = pb.now(), t = f / FS;
