@@ -22,6 +22,8 @@
     <div class="card" id="cardAudio">
       <h2>1 · Audio</h2>
       <button id="startBtn" class="primary big">Start audio</button>
+      <button id="phoneBtn" class="big native-only">📱 Use iPhone as live mic (QR code)</button>
+      <div id="audioErr" class="hint bad" hidden></div>
       <div id="audioCfg" hidden>
         <div class="row mac-only"><label style="flex:1">Output: signal to the console (USB interface or Dante Virtual Soundcard)
           <select id="outSel"></select></label><button id="refreshDev" title="Re-scan audio devices">↻ Refresh</button></div>

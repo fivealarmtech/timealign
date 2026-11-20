@@ -77,6 +77,10 @@
       for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
       analyzeFile({ name: (names || ['recording'])[0], arrayBuffer: async () => u8.buffer }).catch(showErr);
     },
+    onRemoteInfo(r) {
+      if (r && r.ok) { showRemotePanel(Object.assign({ remote: true }, r)); audioErr(''); }
+      else audioErr('iPhone link could not start: ' + ((r && r.error) || 'unknown error'));
+    },
     onRemote(f, b64, peer) {
       if (!E.remote) return;
       const bin = atob(b64), n = bin.length >> 1, x = new Float32Array(n);
@@ -91,10 +95,25 @@
   };
   const engineOn = () => (NATIVE ? E.native : !!E.ctx);
 
+  function audioErr(msg) { const el = $('#audioErr'); el.textContent = msg || ''; el.hidden = !msg; }
+  async function phoneMode() {
+    try {
+      audioErr('');
+      setStatus('Starting the iPhone link…');
+      if (!nat.devices.length) await listDevices();
+      S.inId = 'remote'; save();
+      if ($('#inSel').querySelector('option[value="remote"]')) $('#inSel').value = 'remote';
+      $('#audioCfg').hidden = false;
+      natPost({ cmd: 'remoteInfo' });            // QR codes appear as soon as the link is up
+      if (!E.seqReady) await prepareSequences();
+      await openEngine();
+    } catch (e) { showErr(e); audioErr(String(e && e.message ? e.message : e)); }
+  }
   function showRemotePanel(r) {
     const p = $('#remotePanel');
-    if (!r || !r.remote) { p.hidden = true; return; }
+    if (!r || !r.remote) { if (S.inId !== 'remote') p.hidden = true; return; }
     $('#qrLive').src = r.qr || ''; $('#qrSetup').src = r.qrSetup || '';
+    $('#qrLive').hidden = !r.qr; $('#qrSetup').hidden = !r.qrSetup;
     $('#urlLive').textContent = r.url || ''; $('#urlSetup').textContent = r.setupUrl || '';
     p.hidden = false;
     nat.lastRemote = 0;
@@ -217,7 +236,8 @@
       natPost({ cmd: 'open', out: playback ? S.outId : '', in: S.inId, micCh: +S.micCh, refCh: ref });
       setTimeout(() => res({ ok: false, error: 'No answer from the audio system (if a microphone permission box is showing, answer it, then press Restart audio).' }), 30000);
     });
-    if (!r || !r.ok) { setStatus((r && r.error) || 'Could not open the audio devices.', 'bad'); return; }
+    if (!r || !r.ok) { const m = (r && r.error) || 'Could not open the audio devices.'; setStatus(m, 'bad'); audioErr(m); return; }
+    audioErr('');
     E.native = true; E.nOut = r.outCh || 0; E.inCh = r.inCh || 0; E.remote = !!r.remote;
     showRemotePanel(r);
     if (!nat.seqSent) { for (const id of ALL_IDS) natPost({ cmd: 'seq', id, data: f32b64(TA.getSequence(id).x) }); nat.seqSent = true; }
@@ -1012,6 +1032,7 @@
       } catch (e) { showErr(e); }
     };
     $('#refreshDev').onclick = () => listDevices().catch(showErr);
+    $('#phoneBtn').onclick = () => phoneMode();
     if (!NATIVE && navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener('devicechange', () => { if (E.stream) listDevices().catch(() => {}); });
     }
@@ -1093,6 +1114,7 @@
 
   // ------------------------------------------------------------------ boot
   bind(); renderZones(); syncInputs(); drawPlot();
+  if (window.__TA_VERSION) $('.brand small').textContent = 'v' + window.__TA_VERSION;
   if (NATIVE) {
     document.documentElement.classList.add('native');
     $('#roleSeg button[data-role=listen]').textContent = 'Listen only';

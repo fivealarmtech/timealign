@@ -420,8 +420,13 @@ final class CertManager {
         try openssl(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial",
                      "-out", "leaf.crt", "-days", "397", "-sha256", "-extfile", "leaf.ext"])
         try? FileManager.default.removeItem(atPath: path("leaf.p12"))
-        try openssl(["pkcs12", "-export", "-out", "leaf.p12", "-inkey", "leaf.key", "-in", "leaf.crt", "-certfile", "ca.crt",
-                     "-passout", "pass:timealign", "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES", "-macalg", "sha1"])
+        do {
+            try openssl(["pkcs12", "-export", "-out", "leaf.p12", "-inkey", "leaf.key", "-in", "leaf.crt", "-certfile", "ca.crt",
+                         "-passout", "pass:timealign", "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES", "-macalg", "sha1"])
+        } catch {
+            try openssl(["pkcs12", "-export", "-out", "leaf.p12", "-inkey", "leaf.key", "-in", "leaf.crt", "-certfile", "ca.crt",
+                         "-passout", "pass:timealign"])
+        }
         try sanLine.write(toFile: path("leaf.san"), atomically: true, encoding: .utf8)
     }
 
@@ -719,6 +724,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             p.addEvent(id, GateEvent(frame: frame < 0 ? 0 : Int64(frame), target: Float(target), ramp: ramp))
         case "stopAll": player?.stopAll()
         case "phoneStatus": if let t = body["text"] as? String { server?.setStatus(t) }
+        case "remoteInfo":
+            do {
+                var info = try startRemote()
+                info["ok"] = true
+                js("__native.onRemoteInfo(\(jsonString(info)))")
+            } catch let e as AudioError {
+                js("__native.onRemoteInfo(\(jsonString(["ok": false, "error": e.msg])))")
+            } catch {
+                js("__native.onRemoteInfo(\(jsonString(["ok": false, "error": "\(error)"])))")
+            }
         case "openFile": openFile()
         case "copy":
             if let t = body["text"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }
@@ -769,6 +784,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         let devs = allDevices()
         var result: [String: Any] = ["ok": true]
         do {
+            if wantsRemote { for (k, v) in try startRemote() { result[k] = v } }
             if !outUID.isEmpty {
                 guard let d = devs.first(where: { $0.uid == outUID }), d.outCh > 0 else { throw AudioError(msg: "The output device is no longer available. Press Refresh.") }
                 _ = setNominalRate(d.id, SR)
@@ -779,8 +795,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 result["outCh"] = d.outCh; result["outName"] = d.name
             }
             if wantsRemote {
-                let info = try startRemote()
-                for (k, v) in info { result[k] = v }
                 result["inCh"] = 1; result["inName"] = "iPhone (live over Wi-Fi)"; result["micCh"] = 1; result["remote"] = true
                 remoteActive = true
                 reply(result)
@@ -873,6 +887,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let config = WKWebViewConfiguration()
         config.userContentController.add(bridge, name: "ta")
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "?"
+        let bld = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "?"
+        config.userContentController.addUserScript(WKUserScript(source: "window.__TA_VERSION = '\(ver).\(bld)';", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 1440, height: 940), configuration: config)
         web.setValue(false, forKey: "drawsBackground")
         bridge.web = web

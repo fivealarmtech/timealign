@@ -112,3 +112,8 @@ body.role-mac .listen-only { display: none !important; }
 .qr .url { font-size: 10px; word-break: break-all; margin-top: 4px; color: #56626f; }
 
 [hidden] { display: none !important; }
+
+.native-only { display: none; }
+html.native .native-only { display: inline-block; }
+#phoneBtn { background: var(--accent2); color: #001521; border-color: var(--accent2); font-weight: 700; }
+#audioErr { font-size: 13px; margin: 6px 0; white-space: pre-wrap; }

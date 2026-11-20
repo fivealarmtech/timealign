@@ -47,10 +47,12 @@ const MOCK = () => {
       { uid: 'dvs', name: 'Dante Virtual Soundcard', inCh: 64, outCh: 64, rate: 48000 }], ['mbp-spk', 'mbp-mic']), 10);
     if (o.cmd === 'open') { st.open = true; st.openMsg = o; st.remote = o.in === 'remote'; if (!st.timer) st.timer = setInterval(render, 1000 * CH / FS);
       const qr = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      if (window.__failOutput) { setTimeout(() => window.__native.onOpen({ ok: false, error: 'The output device is no longer available. Press Refresh.' }), 10); return; }
       setTimeout(() => window.__native.onOpen(st.remote
         ? { ok: true, outCh: 64, inCh: 1, outName: 'Dante Virtual Soundcard', inName: 'iPhone (live over Wi-Fi)', micCh: 1, remote: true, url: 'https://192.168.1.20:8443/?k=abc', setupUrl: 'http://192.168.1.20:8080/', qr, qrSetup: qr }
         : { ok: true, outCh: o.out ? 64 : 0, inCh: 64, outName: 'Dante Virtual Soundcard', inName: 'Dante Virtual Soundcard', micCh: o.micCh }), 10); }
     if (o.cmd === 'phoneStatus') st.phone.push(o.text);
+    if (o.cmd === 'remoteInfo') setTimeout(() => window.__native.onRemoteInfo({ ok: true, url: 'https://192.168.1.20:8443/?k=abc', setupUrl: 'http://192.168.1.20:8080/', qr: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', qrSetup: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' }), 50);
     if (o.cmd === 'seq') st.seq[o.id] = unb64(o.data);
     if (o.cmd === 'route') st.routes[o.id] = o.chans;
     if (o.cmd === 'gate') { (st.events[o.id] = st.events[o.id] || []).push({ frame: o.frame < 0 ? 0 : o.frame, target: o.target, ramp: o.ramp }); st.events[o.id].sort((a, b) => a.frame - b.frame); }
